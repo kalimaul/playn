@@ -113,7 +113,7 @@ public class GLProgram implements Closeable {
     if (compiled[0] == GL20.GL_FALSE) {
       String log = gl.glGetShaderInfoLog(shader);
       gl.glDeleteShader(shader);
-      throw new RuntimeException("Failed to compile shader (" + type + "): " + log);
+      throw new RuntimeException("Failed to compile shader (" + type + "): " + log + "\n" + shaderSource);
     }
     return shader;
   }

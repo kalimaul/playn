@@ -23,7 +23,7 @@ import static playn.core.GL20.*;
 public class TriangleBatch extends QuadBatch {
 
   /** The source for the stock triangle batch shader program. */
-  public static class Source extends TexturedBatch.Source {
+  public static class Source {
 
     /** Declares the uniform variables for our shader. */
     public static final String VERT_UNIFS =
@@ -34,7 +34,8 @@ public class TriangleBatch extends QuadBatch {
     public static final String VERT_ATTRS =
       "attribute vec4 a_Matrix;\n" +
       "attribute vec2 a_Translation;\n" +
-      "attribute vec2 a_Color;\n";
+      "attribute vec2 a_Color;\n" +
+      "attribute float a_Texture;\n";
 
     /** The varies-per-vert attribute variables for our shader. */
     public static final String PER_VERT_ATTRS =
@@ -44,7 +45,8 @@ public class TriangleBatch extends QuadBatch {
     /** Declares the varying variables for our shader. */
     public static final String VERT_VARS =
       "varying vec2 v_TexCoord;\n" +
-      "varying vec4 v_Color;\n";
+      "varying vec4 v_Color;\n" +
+      "varying float v_Texture;\n";
 
     /** The shader code that computes {@code gl_Position}. */
     public static final String VERT_SETPOS =
@@ -63,7 +65,8 @@ public class TriangleBatch extends QuadBatch {
 
     /** The shader code that computes {@code v_TexCoord}. */
     public static final String VERT_SETTEX =
-      "v_TexCoord = a_TexCoord;\n";
+      "v_TexCoord = a_TexCoord;\n" +
+      "v_Texture = a_Texture;\n";
 
     /** The shader code that computes {@code v_Color}. */
     public static final String VERT_SETCOLOR =
@@ -86,8 +89,58 @@ public class TriangleBatch extends QuadBatch {
               VERT_SETCOLOR +
               "}");
     }
-  }
+    
+    public String fragment (int textureUnitCount) {
+        StringBuilder str = new StringBuilder(FRAGMENT_PREAMBLE);
+        str.append(textureUniforms(textureUnitCount));
+        str.append(textureVaryings());
+        str.append("void main(void) {\n");
+        str.append(textureColor(textureUnitCount));
+        str.append(textureTint());
+        str.append(textureAlpha());
+        str.append("  gl_FragColor = textureColor;\n" +
+                   "}");
+        return str.toString();
+      }
 
+      protected String textureUniforms (int textureUnitCount) {
+        return "uniform sampler2D u_Textures[" + textureUnitCount + "];\n";
+      }
+      
+      protected String textureVaryings () {
+        return ("varying mediump vec2 v_TexCoord;\n" +
+                "varying lowp vec4 v_Color;\n" + 
+        		"varying float v_Texture;\n");
+      }
+      
+      protected String textureColor (int textureUnitCount) {
+    	  String txt = ""+
+    			  "   vec4 textureColor = vec4(0, 0, 0, 0);\n";
+    	  for (int i = 0; i < textureUnitCount; ++i) {
+    		  txt += "   textureColor += texture2D(u_Textures[" + i + "], v_TexCoord) * " +
+    				  "clamp(-abs(float(" + i + ") - v_Texture) + 1.0, 0.0, 1.0);\n";
+    	  }
+    	  
+    	  return txt;
+      }
+      protected String textureTint () {
+        return "  textureColor.rgb *= v_Color.rgb;\n";
+      }
+      protected String textureAlpha () {
+        return "  textureColor *= v_Color.a;\n";
+      }
+
+      protected static final String FRAGMENT_PREAMBLE =
+        "#ifdef GL_ES\n" +
+        "precision lowp float;\n" +
+        "#else\n" +
+        // Not all versions of regular OpenGL supports precision qualifiers, define placeholders
+        "#define lowp\n" +
+        "#define mediump\n" +
+        "#define highp\n" +
+        "#endif\n";
+  }
+  
   private static final int START_VERTS = 16*4;
   private static final int EXPAND_VERTS = 16*4;
   private static final int START_ELEMS = 6*START_VERTS/4;
@@ -97,18 +150,22 @@ public class TriangleBatch extends QuadBatch {
   private final boolean delayedBinding;
 
   protected final GLProgram program;
-  protected final int uTexture;
+  protected final int uTextures;
   protected final int uHScreenSize;
   protected final int uFlip;
-  protected final int aMatrix, aTranslation, aColor; // stable (same for whole quad)
+  protected final int aMatrix, aTranslation, aColor, aTexture; // stable (same for whole quad)
   protected final int aPosition, aTexCoord; // changing (varies per quad vertex)
 
   protected final int verticesId, elementsId;
   protected final float[] stableAttrs;
   protected float[] vertices;
   protected short[] elements;
+  protected int[] textures;
+  protected int[] textureRefs;
   protected int vertPos, elemPos;
-
+  
+  protected final int textureUnitCount;
+  
   /** Creates a triangle batch with the default shader program. */
   public TriangleBatch (GL20 gl) {
     this(gl, new Source());
@@ -118,14 +175,16 @@ public class TriangleBatch extends QuadBatch {
   public TriangleBatch (GL20 gl, Source source) {
     super(gl);
     delayedBinding = "Intel".equals(gl.glGetString(GL20.GL_VENDOR));
+    textureUnitCount = Math.min(1, gl.glGetInteger(GL_MAX_TEXTURE_IMAGE_UNITS));
 
-    program = new GLProgram(gl, source.vertex(), source.fragment());
-    uTexture = program.getUniformLocation("u_Texture");
+    program = new GLProgram(gl, source.vertex(), source.fragment(textureUnitCount));
+    uTextures = program.getUniformLocation("u_Textures");
     uHScreenSize = program.getUniformLocation("u_HScreenSize");
     uFlip = program.getUniformLocation("u_Flip");
     aMatrix = program.getAttribLocation("a_Matrix");
     aTranslation = program.getAttribLocation("a_Translation");
     aColor = program.getAttribLocation("a_Color");
+    aTexture = program.getAttribLocation("a_Texture");
     aPosition = program.getAttribLocation("a_Position");
     aTexCoord = program.getAttribLocation("a_TexCoord");
 
@@ -133,6 +192,14 @@ public class TriangleBatch extends QuadBatch {
     stableAttrs = new float[stableAttrsSize()];
     vertices = new float[START_VERTS*vertexSize()];
     elements = new short[START_ELEMS];
+    textures = new int[textureUnitCount];
+    
+    textureRefs = new int[textureUnitCount];
+    
+    for (int i = 0; i < textureUnitCount; ++i) {
+    	textures[i] = -1;
+    	textureRefs[i] = i;
+    }
 
     // create our GL buffers
     int[] ids = new int[2];
@@ -154,6 +221,21 @@ public class TriangleBatch extends QuadBatch {
    * See {@link #prepare(int,AffineTransform)}.
    */
   public void prepare (int tint, float m00, float m01, float m10, float m11, float tx, float ty) {
+	int texPos = -1;
+	for (int i = 0; i < textureUnitCount; ++i) {
+		if (textures[i] < 0 || textures[i] == curTexId) {
+			texPos = i;
+			break;
+		}
+	}
+	
+	if (texPos < 0) {
+		flush();
+		texPos = 0;
+	}
+	
+	textures[texPos] = curTexId;
+	  
     float[] stables = stableAttrs;
     stables[0] = m00;
     stables[1] = m01;
@@ -163,8 +245,14 @@ public class TriangleBatch extends QuadBatch {
     stables[5] = ty;
     stables[6] = (tint >> 16) & 0xFFFF; // ar
     stables[7] = (tint >>  0) & 0xFFFF; // gb
-    addExtraStableAttrs(stables, 8);
+    stables[8] = texPos;
+    addExtraStableAttrs(stables, 12);
   }
+  
+  @Override
+  	public void setTexture (Texture texture) {
+	    this.curTexId = texture.id;
+  	}
 
   /**
    * Adds a collection of textured triangles to the current render operation.
@@ -286,6 +374,7 @@ public class TriangleBatch extends QuadBatch {
     glBindVertAttrib(aMatrix, 4, GL_FLOAT, stride, 0);
     glBindVertAttrib(aTranslation, 2, GL_FLOAT, stride, 16);
     glBindVertAttrib(aColor, 2, GL_FLOAT, stride, 24);
+    glBindVertAttrib(aTexture, 1, GL_FLOAT, stride, 32);
 
     // bind our changing vertex attributes
     int offset = stableAttrsSize()*FLOAT_SIZE_BYTES;
@@ -293,19 +382,26 @@ public class TriangleBatch extends QuadBatch {
     glBindVertAttrib(aTexCoord, 2, GL_FLOAT, stride, offset+8);
 
     gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementsId);
-    gl.glActiveTexture(GL_TEXTURE0);
-    gl.glUniform1i(uTexture, 0);
   }
 
   @Override public void flush () {
     super.flush();
     if (vertPos > 0) {
-      bindTexture();
-
       if (delayedBinding) {
         bindAttribsBufs(); // see comments in activate()
         gl.checkError("TriangleBatch.flush bind");
       }
+      
+      for (int i = 0; i < textureUnitCount; ++i) {
+		  gl.glActiveTexture(GL_TEXTURE0 + i);
+		  gl.glBindTexture(GL_TEXTURE_2D, textures[i] >= 0 ? textures[i] : textures[0]);
+		  gl.checkError("TriangleBatch.flush texture bind");
+		  
+		  gl.glUniform1i(program.getUniformLocation("u_Textures[" + i + "]"), i);
+      }
+      
+      //gl.glUniform1iv(uTextures, textureUnitCount, textureRefs, 0);
+      //gl.checkError("TriangleBatch.flush textures uniform");
 
       gl.bufs.setFloatBuffer(vertices, 0, vertPos);
       gl.glBufferData(GL_ARRAY_BUFFER, vertPos*4, gl.bufs.floatBuffer, GL_STREAM_DRAW);
@@ -319,6 +415,10 @@ public class TriangleBatch extends QuadBatch {
 
       vertPos = 0;
       elemPos = 0;
+      
+      for (int i = 0; i < textureUnitCount; ++i) {
+        	textures[i] = -1;
+      }
     }
   }
 
@@ -327,6 +427,7 @@ public class TriangleBatch extends QuadBatch {
     gl.glDisableVertexAttribArray(aMatrix);
     gl.glDisableVertexAttribArray(aTranslation);
     gl.glDisableVertexAttribArray(aColor);
+    gl.glDisableVertexAttribArray(aTexture);
     gl.glDisableVertexAttribArray(aPosition);
     gl.glDisableVertexAttribArray(aTexCoord);
     gl.checkError("TriangleBatch end");
@@ -344,7 +445,7 @@ public class TriangleBatch extends QuadBatch {
   /** Returns the size (in floats) of the stable attributes. If a custom shader adds additional
     * stable attributes, it should use this to determine the offset at which to bind them, and
     * override this method to return the new size including their attributes. */
-  protected int stableAttrsSize() { return 8; }
+  protected int stableAttrsSize() { return 12; }
   protected int vertexSize () { return stableAttrsSize() + 4; }
   protected int vertexStride () { return vertexSize() * FLOAT_SIZE_BYTES; }
 
